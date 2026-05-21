@@ -2,7 +2,6 @@
 #include <string>
 #include <vector>
 #include <thread>
-#include <atomic>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -17,55 +16,47 @@ extern "C" {
 #define MA_NO_ALSA
 #define MINIAUDIO_IMPLEMENTATION
 #include "miniaudio.h"
-#include "protocol.h" // Pull in our shared socket structures
+#include "protocol.h"
 
-// This structure holds our shared global variables accessible across our threads
 struct AudioPlayerState {
     AVAudioFifo* fifo = nullptr;
     pthread_mutex_t mutex;
 
-    // Shared state controls
-    std::vector<std::string> song_queue;
-    int current_volume = 80;       // Volume level scaled from 0-100
+    // TWO SEPARATE TRACK CONTAINERS
+    std::vector<std::string> user_queue;     // Populated by --add
+    std::vector<std::string> auto_playlist;   // Populated by --playlist (.m3u parsing)
+
+    int current_volume = 80;
     bool is_paused = false;
     bool skip_requested = false;
     bool quit_requested = false;
     std::string current_track_name = "None";
 };
 
-// =================================================================
-// 1. MINIAUDIO HARDWARE CALLBACK WITH SOFTWARE VOLUME MULTIPLIER
-// =================================================================
 void audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
     AudioPlayerState* state = (AudioPlayerState*)pDevice->pUserData;
     if (!state || !state->fifo) return;
 
     pthread_mutex_lock(&state->mutex);
 
-    // If the user paused the player via player-ctl, output silence to the speakers
     if (state->is_paused) {
         memset(pOutput, 0, frameCount * ma_get_bytes_per_frame(pDevice->playback.format, pDevice->playback.channels));
         pthread_mutex_unlock(&state->mutex);
         return;
     }
 
-    // Check if the FIFO ring buffer has enough samples to feed the audio card
     if (av_audio_fifo_size(state->fifo) < (int)frameCount) {
-        // Output silence briefly if the decoder loop falls slightly behind
         memset(pOutput, 0, frameCount * ma_get_bytes_per_frame(pDevice->playback.format, pDevice->playback.channels));
         pthread_mutex_unlock(&state->mutex);
         return;
     }
 
-    // Pull raw Interleaved PCM data straight out of our FIFO buffer
     uint8_t* output_buffer = (uint8_t*)pOutput;
     av_audio_fifo_read(state->fifo, (void**)&output_buffer, frameCount);
 
-    // Grab the active volume level to apply real-time math scaling
     float volume_factor = state->current_volume / 100.0f;
     pthread_mutex_unlock(&state->mutex);
 
-    // Scale our individual audio waves mathematically
     int16_t* samples = (int16_t*)pOutput;
     int total_samples = frameCount * pDevice->playback.channels;
     for (int i = 0; i < total_samples; ++i) {
@@ -73,14 +64,11 @@ void audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_ui
     }
 }
 
-// =================================================================
-// 2. UNIX DOMAIN SOCKET LISTENER BACKGROUND THREAD
-// =================================================================
 void socket_listener_thread(AudioPlayerState* state) {
     int server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (server_fd < 0) return;
 
-    unlink(SOCKET_PATH); // Wipe old socket node artifacts from previous runs
+    unlink(SOCKET_PATH);
 
     sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
@@ -94,7 +82,6 @@ void socket_listener_thread(AudioPlayerState* state) {
     listen(server_fd, 10);
 
     while (true) {
-        // Check if main thread asked to clean down the program
         pthread_mutex_lock(&state->mutex);
         if (state->quit_requested) {
             pthread_mutex_unlock(&state->mutex);
@@ -109,36 +96,38 @@ void socket_listener_thread(AudioPlayerState* state) {
         if (recv(client_fd, &cmd, sizeof(PlayerCommand), 0) > 0) {
             pthread_mutex_lock(&state->mutex);
 
-            // Process the incoming command block safely inside our mutex barrier
             switch (cmd.type) {
                 case CommandType::ADD_TO_QUEUE:
-                    state->song_queue.push_back(cmd.path_value);
-                    std::cout << "\n[Daemon] Added track to queue: " << cmd.path_value << "\n" << std::flush;
+                    state->user_queue.push_back(cmd.path_value);
+                    std::cout << "\n[User Queue] Added: " << cmd.path_value << "\n" << std::flush;
+                    break;
+                case CommandType::ADD_TO_PLAYLIST:
+                    state->auto_playlist.push_back(cmd.path_value);
+                    break;
+                case CommandType::CLEAR_PLAYLIST:
+                    state->auto_playlist.clear();
+                    std::cout << "\n[Playlist] Context cleared completely.\n" << std::flush;
                     break;
                 case CommandType::PLAY:
                     state->is_paused = false;
-                    std::cout << "\n[Daemon] Playback Resumed.\n" << std::flush;
                     break;
                 case CommandType::PAUSE:
                     state->is_paused = true;
-                    std::cout << "\n[Daemon] Playback Paused.\n" << std::flush;
                     break;
                 case CommandType::SKIP:
                     state->skip_requested = true;
-                    std::cout << "\n[Daemon] Skipping current track...\n" << std::flush;
                     break;
                 case CommandType::SET_VOLUME:
                     state->current_volume = cmd.int_value;
-                    std::cout << "\n[Daemon] Volume updated to: " << state->current_volume << "%\n" << std::flush;
                     break;
                 case CommandType::GET_STATUS:
-                    // Print status directly on our daemon logger stdout window
-                    std::cout << "\n--- Current Player Status Query ---\n"
-                    << "Active Track: " << state->current_track_name << "\n"
-                    << "Volume: " << state->current_volume << "%\n"
-                    << "State: " << (state->is_paused ? "PAUSED" : "PLAYING") << "\n"
-                    << "Tracks in Queue: " << state->song_queue.size() << "\n"
-                    << "-----------------------------------\n" << std::flush;
+                    std::cout << "\n--- Media Engine Monitor ---\n"
+                    << "Playing Now: " << state->current_track_name << "\n"
+                    << "Volume State: " << state->current_volume << "%\n"
+                    << "Playback Context: " << (state->is_paused ? "PAUSED" : "PLAYING") << "\n"
+                    << "User Queue Size: " << state->user_queue.size() << " tracks\n"
+                    << "Playlist Pool Size: " << state->auto_playlist.size() << " tracks\n"
+                    << "----------------------------\n" << std::flush;
                     break;
             }
             pthread_mutex_unlock(&state->mutex);
@@ -149,49 +138,49 @@ void socket_listener_thread(AudioPlayerState* state) {
     unlink(SOCKET_PATH);
 }
 
-// =================================================================
-// 3. MAIN AUDIO DECODING AND PLAYBACK STREAM ENGINE
-// =================================================================
 int main(int argc, char* argv[]) {
     AudioPlayerState player_state;
     pthread_mutex_init(&player_state.mutex, nullptr);
 
-    // Seed initial queue if files are passed directly to our binary startup execution call
+    // Initial CLI launch parameters route cleanly into our high priority queue
     for (int i = 1; i < argc; ++i) {
-        player_state.song_queue.push_back(argv[i]);
+        player_state.user_queue.push_back(argv[i]);
     }
 
-    // Initialize the background socket listener execution thread
     std::thread listener(socket_listener_thread, &player_state);
-    listener.detach(); // Allow the listener thread to cycle freely in the background
+    listener.detach();
 
-    std::cout << "Media Daemon Active. Listening on: " << SOCKET_PATH << "\n";
+    std::cout << "Media Daemon Active Engine Running.\n";
 
-    // Continuous main application tracking loop
     while (true) {
         std::string next_track = "";
 
         pthread_mutex_lock(&player_state.mutex);
-        if (player_state.song_queue.empty()) {
+
+        // HIERARCHICAL QUEUE RESOLUTION LOGIC
+        if (!player_state.user_queue.empty()) {
+            next_track = player_state.user_queue.front();
+            player_state.user_queue.erase(player_state.user_queue.begin());
+        }
+        else if (!player_state.auto_playlist.empty()) {
+            next_track = player_state.auto_playlist.front();
+            player_state.auto_playlist.erase(player_state.auto_playlist.begin());
+        }
+        else {
             pthread_mutex_unlock(&player_state.mutex);
-            // Throttle main execution wheel while waiting for player-ctl to populate the queue
-            usleep(100000); // 100ms idle window
+            usleep(100000); // Rest if all queues sit empty
             continue;
         }
 
-        // Extract the front item from our queue array
-        next_track = player_state.song_queue.front();
-        player_state.song_queue.erase(player_state.song_queue.begin());
         player_state.current_track_name = next_track;
         player_state.skip_requested = false;
         pthread_mutex_unlock(&player_state.mutex);
 
-        std::cout << "\nNow Running: " << next_track << "\n" << std::flush;
+        std::cout << "\n[Playing] " << next_track << "\n" << std::flush;
 
-        // Standard FFmpeg file handling
         AVFormatContext* format_context = nullptr;
         if (avformat_open_input(&format_context, next_track.c_str(), nullptr, nullptr) < 0) {
-            std::cerr << "Could not open file: " << next_track << "\n";
+            std::cerr << "Fail to open location string target: " << next_track << "\n";
             continue;
         }
 
@@ -228,35 +217,30 @@ int main(int argc, char* argv[]) {
                             0, nullptr);
         swr_init(swr_ctx);
 
-        // Dynamically initialize or flush the active storage ring buffer
         pthread_mutex_lock(&player_state.mutex);
         if (player_state.fifo) av_audio_fifo_free(player_state.fifo);
-            player_state.fifo = av_audio_fifo_alloc(target_sample_fmt, codec_context->ch_layout.nb_channels, 1);
-            pthread_mutex_unlock(&player_state.mutex);
+        player_state.fifo = av_audio_fifo_alloc(target_sample_fmt, codec_context->ch_layout.nb_channels, 1);
+        pthread_mutex_unlock(&player_state.mutex);
 
-            // Configure miniaudio link targets
-            ma_device_config deviceConfig  = ma_device_config_init(ma_device_type_playback);
-            deviceConfig.playback.format   = ma_format_s16;
-            deviceConfig.playback.channels = codec_context->ch_layout.nb_channels;
-            deviceConfig.sampleRate        = codec_context->sample_rate;
-            deviceConfig.dataCallback      = audio_callback;
-            deviceConfig.pUserData         = &player_state;
+        ma_device_config deviceConfig = ma_device_config_init(ma_device_type_playback);
+        deviceConfig.playback.format   = ma_format_s16;
+        deviceConfig.playback.channels = codec_context->ch_layout.nb_channels;
+        deviceConfig.sampleRate        = codec_context->sample_rate;
+        deviceConfig.dataCallback      = audio_callback;
+        deviceConfig.pUserData         = &player_state;
 
-            ma_device device;
-
-        if (ma_device_init(NULL, &deviceConfig, &device) == MA_SUCCESS) {
-            ma_device_start(&device);
-        } else {
-            std::cerr << "Could not bind miniaudio channel context\n";
+        ma_device device;
+        if (ma_device_init(NULL, &deviceConfig, &device) != MA_SUCCESS) {
+            std::cerr << "Hardware binding exception\n";
+            continue;
         }
+        ma_device_start(&device);
 
         AVPacket* packet = av_packet_alloc();
         AVFrame* frame = av_frame_alloc();
 
-        // Core extraction loop for the active track
         while (av_read_frame(format_context, packet) >= 0) {
             pthread_mutex_lock(&player_state.mutex);
-            // Check if the user initiated a skip or program shutdown
             if (player_state.skip_requested || player_state.quit_requested) {
                 pthread_mutex_unlock(&player_state.mutex);
                 break;
@@ -278,7 +262,6 @@ int main(int argc, char* argv[]) {
 
                         av_freep(&converted_output_buffer);
 
-                        // Throttle data generation loop if buffer gets full
                         while (true) {
                             pthread_mutex_lock(&player_state.mutex);
                             int size = av_audio_fifo_size(player_state.fifo);
@@ -294,7 +277,7 @@ int main(int argc, char* argv[]) {
             av_packet_unref(packet);
         }
 
-        // Wait until the audio card finishes draining the remaining track fragments out of the FIFO queue
+        // Complete track sequence drainage calculations
         while (true) {
             pthread_mutex_lock(&player_state.mutex);
             int remaining_samples = av_audio_fifo_size(player_state.fifo);
@@ -305,18 +288,15 @@ int main(int argc, char* argv[]) {
             usleep(20000);
         }
 
-        // 1. Explicitly stop and close the hardware playback interface before cleanup
+        // FIX: Explicitly call device teardown sequence before parsing next track allocation bounds
         ma_device_stop(&device);
         ma_device_uninit(&device);
 
-        // 2. Clear out the rest of your FFmpeg pointers
         av_frame_free(&frame);
         av_packet_free(&packet);
         swr_free(&swr_ctx);
         avcodec_free_context(&codec_context);
         avformat_close_input(&format_context);
-
-        std::cout << "Track execution block finished. Advancing...\n" << std::flush;
     }
 
     pthread_mutex_destroy(&player_state.mutex);
