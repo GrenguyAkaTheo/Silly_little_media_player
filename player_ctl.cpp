@@ -10,6 +10,15 @@
 
 namespace fs = std::filesystem;
 
+// Helper utility to turn integer seconds into zero-padded MM:SS strings
+std::string format_time(int32_t total_seconds) {
+    int32_t minutes = total_seconds / 60;
+    int32_t seconds = total_seconds % 60;
+    std::string min_str = (minutes < 10 ? "0" : "") + std::to_string(minutes);
+    std::string sec_str = (seconds < 10 ? "0" : "") + std::to_string(seconds);
+    return min_str + ":" + sec_str;
+}
+
 // Helper function to handle sending a packed struct across a raw socket descriptor
 bool transmit_command(const PlayerCommand& cmd) {
     int socket_fd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -32,13 +41,18 @@ bool transmit_command(const PlayerCommand& cmd) {
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         std::cout << "Usage:\n"
-        << "  " << argv[0] << " --add <path_to_song>       Add a song to the high-priority user queue\n"
-        << "  " << argv[0] << " --playlist <path_to_m3u>   Load an .m3u playlist file into background queue\n"
-        << "  " << argv[0] << " --clear                    Clear the background playlist queue\n"
-        << "  " << argv[0] << " --play | --pause | --skip\n"
-        << "  " << argv[0] << " --volume <0-100>\n"
-        << "  " << argv[0] << " --status\n";
+        << "  " << argv[0] << " --add <path_to_song> _-_-_-_- Add a song to the high-priority user queue\n"
+        << "  " << argv[0] << " --playlist <path_to_m3u> _-_- Load an .m3u playlist file into background queue\n"
+        << "  " << argv[0] << " --clear -_-_-_-_-_-_-_-_-_-_- Clear the background playlist queue\n"
+        << "  " << argv[0] << " --play _-_-_-_-_-_-_-_-_-_-_- Play... It's play...'\n"
+        << "  " << argv[0] << " --pause -_-_-_-_-_-_-_-_-_-_- As simple as play, but pause\n"
+        << "  " << argv[0] << " --skip _-_-_-_-_-_-_-_-_-_-_- Skips the song to the next in queue\n"
+        << "  " << argv[0] << " --back _-_-_-_-_-_-_-_-_-_-_- Plays the previous song\n"
+        << "  " << argv[0] << " --volume _-_-_-_-_-_-_-_-_-_- Changes the volume to a value from 0 to 100\n"
+        << "  " << argv[0] << " --status _-_-_-_-_-_-_-_-_-_- Shows the current status os the main player\n"
+        << "  " << argv[0] << " --shuffle -_-_-_-_-_-_-_-_-_- Shuffles the playlist and keeps the user made queue\n";
         return 1;
+
     }
 
     std::string flag = argv[1];
@@ -98,13 +112,69 @@ int main(int argc, char* argv[]) {
         cmd.type = CommandType::CLEAR_PLAYLIST;
         transmit_command(cmd);
     }
+    else if (flag == "--shuffle") {
+        PlayerCommand cmd{};
+        cmd.type = CommandType::SHUFFLE_PLAYLIST;
+        transmit_command(cmd);
+    }
+    else if (flag == "--back") { // NEW: Handle previous command flag
+        PlayerCommand cmd{};
+        cmd.type = CommandType::PREVIOUS_TRACK;
+        if (transmit_command(cmd)) {
+            std::cout << "Sent previous track request to media engine.\n";
+        } else {
+            std::cerr << "Error: Could not contact media engine daemon.\n";
+        }
+    }
+
+    else if (flag == "--status") {
+        PlayerCommand cmd{};
+        cmd.type = CommandType::GET_STATUS;
+
+        int socket_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (socket_fd < 0) {
+            std::cerr << "Error creating client socket descriptor.\n";
+            return 1;
+        }
+
+        sockaddr_un server_addr{};
+        server_addr.sun_family = AF_UNIX;
+        strncpy(server_addr.sun_path, SOCKET_PATH, sizeof(server_addr.sun_path) - 1);
+
+        if (connect(socket_fd, (sockaddr*)&server_addr, sizeof(server_addr)) >= 0) {
+            // 1. Send our request token down the wire
+            send(socket_fd, &cmd, sizeof(PlayerCommand), 0);
+
+            // 2. Hold the socket open and read back the daemon's status structure pack
+            PlayerStatusResponse res{};
+            if (recv(socket_fd, &res, sizeof(PlayerStatusResponse), 0) > 0) {
+
+                std::cout << "\nMedia player status;\n"
+                << "============================================================\n"
+                << "  Track  : " << res.track_name << "\n"
+                << "  Time   : " << format_time(res.elapsed_seconds) << " / " << format_time(res.duration_seconds) << "\n"
+                << "  Volume : " << res.current_volume << "%\n"
+                << "  Status : " << (res.is_paused ? "PAUSED" : "PLAYING") << "\n"
+                << "------------------------------------------------------------\n"
+                << "  User Queue Pool        : " << res.user_queue_size << " tracks remaining\n"
+                << "  Shuffled Playlist Pool : " << res.playlist_pool_size << " tracks remaining\n"
+                << "============================================================\n" << std::flush;
+            }
+            close(socket_fd);
+            return 0;
+        } else {
+            std::cerr << "Error: Could not contact media engine daemon.\n";
+            close(socket_fd);
+            return 1;
+        }
+    }
+
     else {
         // Handle global control configurations (play, pause, skip, volume, status)
         PlayerCommand cmd{};
         if (flag == "--play") cmd.type = CommandType::PLAY;
         else if (flag == "--pause") cmd.type = CommandType::PAUSE;
         else if (flag == "--skip") cmd.type = CommandType::SKIP;
-        else if (flag == "--status") cmd.type = CommandType::GET_STATUS;
         else if (flag == "--volume" && argc >= 3) {
             cmd.type = CommandType::SET_VOLUME;
             cmd.int_value = std::stoi(argv[2]);

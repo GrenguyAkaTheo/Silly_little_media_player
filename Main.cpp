@@ -5,6 +5,8 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <algorithm>
+#include <random>
 
 extern "C" {
     #include <libavformat/avformat.h>
@@ -22,15 +24,23 @@ struct AudioPlayerState {
     AVAudioFifo* fifo = nullptr;
     pthread_mutex_t mutex;
 
-    // TWO SEPARATE TRACK CONTAINERS
-    std::vector<std::string> user_queue;     // Populated by --add
-    std::vector<std::string> auto_playlist;   // Populated by --playlist (.m3u parsing)
+    std::vector<std::string> user_queue;
+    std::vector<std::string> auto_playlist;
+    std::vector<std::string> playlist_master;
+    std::vector<std::string> history_queue;
 
     int current_volume = 80;
     bool is_paused = false;
     bool skip_requested = false;
+    bool previous_requested = false;
     bool quit_requested = false;
     std::string current_track_name = "None";
+    std::string current_track_path = "";
+
+    // TIME TRACKING VARIABLES
+    uint32_t sample_rate = 44100;
+    double accumulated_samples = 0.0; // Total individual audio frames played for this track
+    int32_t total_duration_seconds = 0;
 };
 
 void audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
@@ -41,6 +51,13 @@ void audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_ui
 
     if (state->is_paused) {
         memset(pOutput, 0, frameCount * ma_get_bytes_per_frame(pDevice->playback.format, pDevice->playback.channels));
+        pthread_mutex_unlock(&state->mutex);
+
+        uint8_t* output_buffer = (uint8_t*)pOutput;
+        av_audio_fifo_read(state->fifo, (void**)&output_buffer, frameCount);
+
+        // Accumulate the consumed hardware frames safely
+        state->accumulated_samples += frameCount;
         pthread_mutex_unlock(&state->mutex);
         return;
     }
@@ -102,11 +119,33 @@ void socket_listener_thread(AudioPlayerState* state) {
                     std::cout << "\n[User Queue] Added: " << cmd.path_value << "\n" << std::flush;
                     break;
                 case CommandType::ADD_TO_PLAYLIST:
+                    // Store in BOTH the active pool and the permanent master copy
                     state->auto_playlist.push_back(cmd.path_value);
+                    state->playlist_master.push_back(cmd.path_value);
                     break;
                 case CommandType::CLEAR_PLAYLIST:
                     state->auto_playlist.clear();
+                    state->playlist_master.clear(); // Wipe both out
                     std::cout << "\n[Playlist] Context cleared completely.\n" << std::flush;
+                    break;
+                case CommandType::SHUFFLE_PLAYLIST:
+                    if (state->playlist_master.empty()) {
+                        std::cout << "\n[Playlist] Cannot shuffle; no playlist currently loaded.\n" << std::flush;
+                    } else {
+                        // 1. Wipe the current active playlist pool clean
+                        state->auto_playlist.clear();
+
+                        // 2. Refresh it completely by copying the full master list back in
+                        state->auto_playlist = state->playlist_master;
+
+                        // 3. Randomize the active pool using a high-quality Mersenne Twister engine
+                        std::random_device rd;
+                        std::mt19937 g(rd());
+                        std::shuffle(state->auto_playlist.begin(), state->auto_playlist.end(), g);
+
+                        std::cout << "\n[Playlist] Re-shuffled! Reset pool with "
+                        << state->auto_playlist.size() << " randomized tracks.\n" << std::flush;
+                    }
                     break;
                 case CommandType::PLAY:
                     state->is_paused = false;
@@ -117,18 +156,43 @@ void socket_listener_thread(AudioPlayerState* state) {
                 case CommandType::SKIP:
                     state->skip_requested = true;
                     break;
+                case CommandType::PREVIOUS_TRACK: // NEW: Handle previous track request
+                    if (state->history_queue.empty()) {
+                        std::cout << "\n[Daemon] Cannot rewind: History queue is empty.\n" << std::flush;
+                    } else {
+                        state->previous_requested = true;
+                        state->skip_requested = true; // Break out of active song decoding loop
+                        std::cout << "\n[Daemon] Rewinding to previous track...\n" << std::flush;
+                    }
+                    break;
                 case CommandType::SET_VOLUME:
                     state->current_volume = cmd.int_value;
                     break;
-                case CommandType::GET_STATUS:
-                    std::cout << "\n--- Media Engine Monitor ---\n"
-                    << "Playing Now: " << state->current_track_name << "\n"
-                    << "Volume State: " << state->current_volume << "%\n"
-                    << "Playback Context: " << (state->is_paused ? "PAUSED" : "PLAYING") << "\n"
-                    << "User Queue Size: " << state->user_queue.size() << " tracks\n"
-                    << "Playlist Pool Size: " << state->auto_playlist.size() << " tracks\n"
-                    << "----------------------------\n" << std::flush;
+                case CommandType::GET_STATUS: {
+                    PlayerStatusResponse res{};
+
+                    // 1. Safely mirror raw tracking primitives into the IPC struct
+                    res.current_volume     = state->current_volume;
+                    res.is_paused          = state->is_paused;
+                    res.user_queue_size    = static_cast<int32_t>(state->user_queue.size());
+                    res.playlist_pool_size = static_cast<int32_t>(state->auto_playlist.size());
+                    res.duration_seconds   = state->total_duration_seconds;
+
+                    // 2. Perform safe, atomic time tracking math based on frame consumption
+                    if (state->sample_rate > 0) {
+                        res.elapsed_seconds = static_cast<int32_t>(state->accumulated_samples / state->sample_rate);
+                    } else {
+                        res.elapsed_seconds = 0;
+                    }
+
+                    // 3. Copy the dynamically fetched song name safely into our fixed char boundary
+                    strncpy(res.track_name, state->current_track_name.c_str(), sizeof(res.track_name) - 1);
+                    res.track_name[sizeof(res.track_name) - 1] = '\0'; // Ensure null-termination boundary
+
+                    // 4. Blast the fully populated struct right back up the socket stream
+                    send(client_fd, &res, sizeof(PlayerStatusResponse), 0);
                     break;
+                }
             }
             pthread_mutex_unlock(&state->mutex);
         }
@@ -137,6 +201,7 @@ void socket_listener_thread(AudioPlayerState* state) {
     close(server_fd);
     unlink(SOCKET_PATH);
 }
+
 
 int main(int argc, char* argv[]) {
     AudioPlayerState player_state;
@@ -153,28 +218,55 @@ int main(int argc, char* argv[]) {
     std::cout << "Media Daemon Active Engine Running.\n";
 
     while (true) {
-        std::string next_track = "";
+        std::string last_played_path = "";
 
-        pthread_mutex_lock(&player_state.mutex);
+        while (true) {
+            std::string next_track = "";
 
-        // HIERARCHICAL QUEUE RESOLUTION LOGIC
-        if (!player_state.user_queue.empty()) {
-            next_track = player_state.user_queue.front();
-            player_state.user_queue.erase(player_state.user_queue.begin());
-        }
-        else if (!player_state.auto_playlist.empty()) {
-            next_track = player_state.auto_playlist.front();
-            player_state.auto_playlist.erase(player_state.auto_playlist.begin());
-        }
-        else {
+            pthread_mutex_lock(&player_state.mutex);
+
+            // 1. If history was requested, pop the last song off the stack
+            if (player_state.previous_requested) {
+                // Push the current track back to the FRONT of the user queue so we can return to it later
+                if (!player_state.current_track_path.empty()) {
+                    player_state.user_queue.insert(player_state.user_queue.begin(), player_state.current_track_path);
+                }
+
+                next_track = player_state.history_queue.back();
+                player_state.history_queue.pop_back();
+                player_state.previous_requested = false;
+            }
+            // 2. Otherwise, progress forward normally through your hierarchical queue structures
+            else {
+                // Before moving forward, log the song that just FINISHED into the history stack
+                if (!player_state.current_track_path.empty()) {
+                    player_state.history_queue.push_back(player_state.current_track_path);
+                    // Bound check: Keep only the last 15 tracks
+                    if (player_state.history_queue.size() > 15) {
+                        player_state.history_queue.erase(player_state.history_queue.begin());
+                    }
+                }
+
+                if (!player_state.user_queue.empty()) {
+                    next_track = player_state.user_queue.front();
+                    player_state.user_queue.erase(player_state.user_queue.begin());
+                }
+                else if (!player_state.auto_playlist.empty()) {
+                    next_track = player_state.auto_playlist.front();
+                    player_state.auto_playlist.erase(player_state.auto_playlist.begin());
+                }
+                else {
+                    // Keep history alive even when idling
+                    player_state.current_track_path = "";
+                    pthread_mutex_unlock(&player_state.mutex);
+                    usleep(100000);
+                    continue;
+                }
+            }
+
+            player_state.current_track_path = next_track; // Cache the active file path
+            player_state.skip_requested = false;
             pthread_mutex_unlock(&player_state.mutex);
-            usleep(100000); // Rest if all queues sit empty
-            continue;
-        }
-
-        player_state.current_track_name = next_track;
-        player_state.skip_requested = false;
-        pthread_mutex_unlock(&player_state.mutex);
 
         std::cout << "\n[Playing] " << next_track << "\n" << std::flush;
 
@@ -189,6 +281,42 @@ int main(int argc, char* argv[]) {
             continue;
         }
 
+        // =================================================================
+        // EXTRACT METADATA TAGS (TITLE & ARTIST) FROM AV_DICTIONARY
+        // =================================================================
+        std::string dynamic_title = "";
+        std::string dynamic_artist = "";
+
+        // Query the dictionary case-insensitively using AV_DICT_IGNORE_SUFFIX
+        AVDictionaryEntry* tag_title = av_dict_get(format_context->metadata, "title", nullptr, AV_DICT_IGNORE_SUFFIX);
+        AVDictionaryEntry* tag_artist = av_dict_get(format_context->metadata, "artist", nullptr, AV_DICT_IGNORE_SUFFIX);
+
+        if (tag_title && tag_title->value) {
+            dynamic_title = tag_title->value;
+        } else {
+            // Fallback: If no title tag exists, extract the raw file name from the path
+            size_t last_slash = next_track.find_last_of("/\\");
+            if (last_slash != std::string::npos) {
+                dynamic_title = next_track.substr(last_slash + 1);
+            } else {
+                dynamic_title = next_track;
+            }
+        }
+
+        if (tag_artist && tag_artist->value) {
+            dynamic_artist = tag_artist->value;
+        } else {
+            dynamic_artist = "Unknown Artist";
+        }
+
+        // Update our thread-synchronized player state name string
+        pthread_mutex_lock(&player_state.mutex);
+        player_state.current_track_name = dynamic_artist + " - " + dynamic_title;
+        pthread_mutex_unlock(&player_state.mutex);
+
+        std::cout << "\n[Playing Now] " << player_state.current_track_name << "\n" << std::flush;
+
+        // Find audio stream indices and continue hardware allocation loop...
         int audio_stream_index = -1;
         AVCodecParameters* codec_params = nullptr;
         for (unsigned int i = 0; i < format_context->nb_streams; i++) {
@@ -198,6 +326,8 @@ int main(int argc, char* argv[]) {
                 break;
             }
         }
+
+
 
         if (audio_stream_index == -1) {
             avformat_close_input(&format_context);
@@ -222,14 +352,34 @@ int main(int argc, char* argv[]) {
         player_state.fifo = av_audio_fifo_alloc(target_sample_fmt, codec_context->ch_layout.nb_channels, 1);
         pthread_mutex_unlock(&player_state.mutex);
 
+        // =================================================================
+        // FIXED: Dynamically bind to the track's native sample rate
+        // =================================================================
         ma_device_config deviceConfig = ma_device_config_init(ma_device_type_playback);
         deviceConfig.playback.format   = ma_format_s16;
         deviceConfig.playback.channels = codec_context->ch_layout.nb_channels;
+
+        // Feed the file context parameters directly to the sound server interface
         deviceConfig.sampleRate        = codec_context->sample_rate;
         deviceConfig.dataCallback      = audio_callback;
         deviceConfig.pUserData         = &player_state;
 
+        // Ensure our inner time tracking state always works with what was initialized
+        pthread_mutex_lock(&player_state.mutex);
+        player_state.sample_rate       = codec_context->sample_rate;
+        player_state.accumulated_samples = 0.0;
+
+        // Calculate total length safely from the container stream layout context
+        if (format_context->duration != AV_NOPTS_VALUE) {
+            player_state.total_duration_seconds = static_cast<int32_t>(format_context->duration / AV_TIME_BASE);
+        } else {
+            player_state.total_duration_seconds = 0;
+        }
+        pthread_mutex_unlock(&player_state.mutex);
+
         ma_device device;
+
+
         if (ma_device_init(NULL, &deviceConfig, &device) != MA_SUCCESS) {
             std::cerr << "Hardware binding exception\n";
             continue;
@@ -325,4 +475,5 @@ int main(int argc, char* argv[]) {
 
     pthread_mutex_destroy(&player_state.mutex);
     return 0;
+    }
 }
