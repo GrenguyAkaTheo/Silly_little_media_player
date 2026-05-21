@@ -278,17 +278,38 @@ int main(int argc, char* argv[]) {
         }
 
         // Complete track sequence drainage calculations
+        int static_count = 0;
+        int last_sample_count = -1;
+
         while (true) {
             pthread_mutex_lock(&player_state.mutex);
             int remaining_samples = av_audio_fifo_size(player_state.fifo);
             bool skip = player_state.skip_requested;
             pthread_mutex_unlock(&player_state.mutex);
 
-            if (remaining_samples <= 0 || skip) break;
-            usleep(20000);
+            // Break instantly if a manual skip was sent
+            if (skip) break;
+
+            // If the buffer is completely empty, we are safe to advance
+            if (remaining_samples <= 0) break;
+
+            // Track if the sample count has stalled (meaning miniaudio stopped consuming it)
+            if (remaining_samples == last_sample_count) {
+                static_count++;
+            } else {
+                static_count = 0; // Reset if data is still actively draining
+                last_sample_count = remaining_samples;
+            }
+
+            // If the buffer has been stagnant for 100ms, the song is naturally over
+            if (static_count >= 5) {
+                std::cout << "[Daemon] Buffer drain complete (tail silence reached).\n";
+                break;
+            }
+            usleep(20000); // 20ms check intervals
         }
 
-        // FIX: Explicitly call device teardown sequence before parsing next track allocation bounds
+        // Securely stop and tear down the hardware channels
         ma_device_stop(&device);
         ma_device_uninit(&device);
 
@@ -297,6 +318,9 @@ int main(int argc, char* argv[]) {
         swr_free(&swr_ctx);
         avcodec_free_context(&codec_context);
         avformat_close_input(&format_context);
+
+        std::cout << "[Daemon] Track wrapped up cleanly. Loading next in queue...\n" << std::flush;
+
     }
 
     pthread_mutex_destroy(&player_state.mutex);
