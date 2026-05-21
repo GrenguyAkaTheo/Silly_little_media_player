@@ -9,3 +9,5 @@ To start the nix shell just run `sudo nix-shell` in the directory with all the c
 simply running ./player-ctl will give a list of the avalable flags for the media player.
 
 This uses C++ 15.2.0, so you will need that or newer (although this is automatically installed to the nix shell in the config I made)
+
+If your user account ID isn't 1000, you will have to change this in the shell.nix file to match your ID
