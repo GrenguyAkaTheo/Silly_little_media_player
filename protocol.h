@@ -15,7 +15,9 @@ enum class CommandType : int32_t {
     GET_STATUS       = 6,
     CLEAR_PLAYLIST   = 7,
     SHUFFLE_PLAYLIST = 8,
-    PREVIOUS_TRACK   = 9
+    PREVIOUS_TRACK   = 9,
+    TOGGLE_SHUFFLE   = 10,
+    TOGGLE_LOOP      = 11
 };
 
 // Packed response payload sent from Daemon back to player-ctl
@@ -28,6 +30,8 @@ struct __attribute__((packed)) PlayerStatusResponse {
     int32_t elapsed_seconds;      // NEW: Total elapsed playback seconds
     int32_t duration_seconds;     // NEW: Total length of track in seconds
     char track_name[512];
+    bool shuffle_enabled;
+    bool loop_enabled;
 };
 
 struct __attribute__((packed)) PlayerCommand {

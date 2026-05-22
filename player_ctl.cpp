@@ -50,7 +50,9 @@ int main(int argc, char* argv[]) {
         << "  " << argv[0] << " --back _-_-_-_-_-_-_-_-_-_-_- Plays the previous song\n"
         << "  " << argv[0] << " --volume _-_-_-_-_-_-_-_-_-_- Changes the volume to a value from 0 to 100\n"
         << "  " << argv[0] << " --status _-_-_-_-_-_-_-_-_-_- Shows the current status os the main player\n"
-        << "  " << argv[0] << " --shuffle -_-_-_-_-_-_-_-_-_- Shuffles the playlist and keeps the user made queue\n";
+        << "  " << argv[0] << " --shuffle -_-_-_-_-_-_-_-_-_- Toggles the shuffle of the playlist\n"
+        << "  " << argv[0] << " --loop _-_-_-_-_-_-_-_-_-_-_- Toggles the loop of the playlist\n"
+        << "  " << argv[0] << " --quit _-_-_-_-_-_-_-_-_-_-_- Quit the player and save settings\n";
         return 1;
 
     }
@@ -114,10 +116,17 @@ int main(int argc, char* argv[]) {
     }
     else if (flag == "--shuffle") {
         PlayerCommand cmd{};
-        cmd.type = CommandType::SHUFFLE_PLAYLIST;
+        cmd.type = CommandType::TOGGLE_SHUFFLE;
         transmit_command(cmd);
+        std::cout << "Sent shuffle toggle command to media engine.\n";
     }
-    else if (flag == "--back") { // NEW: Handle previous command flag
+    else if (flag == "--loop") {
+        PlayerCommand cmd{};
+        cmd.type = CommandType::TOGGLE_LOOP;
+        transmit_command(cmd);
+        std::cout << "Sent loop toggle command to media engine.\n";
+    }
+    else if (flag == "--back") {
         PlayerCommand cmd{};
         cmd.type = CommandType::PREVIOUS_TRACK;
         if (transmit_command(cmd)) {
@@ -126,7 +135,6 @@ int main(int argc, char* argv[]) {
             std::cerr << "Error: Could not contact media engine daemon.\n";
         }
     }
-
     else if (flag == "--status") {
         PlayerCommand cmd{};
         cmd.type = CommandType::GET_STATUS;
@@ -151,13 +159,15 @@ int main(int argc, char* argv[]) {
 
                 std::cout << "\nMedia player status;\n"
                 << "============================================================\n"
-                << "  Track  : " << res.track_name << "\n"
-                << "  Time   : " << format_time(res.elapsed_seconds) << " / " << format_time(res.duration_seconds) << "\n"
-                << "  Volume : " << res.current_volume << "%\n"
-                << "  Status : " << (res.is_paused ? "PAUSED" : "PLAYING") << "\n"
+                << " Track   : " << res.track_name << "\n"
+                << " Time    : " << format_time(res.elapsed_seconds) << " / " << format_time(res.duration_seconds) << "\n"
+                << " Volume  : " << res.current_volume << "%\n"
+                << " Playing : " << (res.is_paused ? "PAUSED" : "PLAYING") << "\n"
+                << " Shuffle : " << (res.shuffle_enabled ? "ON" : "OFF") << "\n"
+                << " Loop    : " << (res.loop_enabled ? "ON" : "OFF") << "\n"
                 << "------------------------------------------------------------\n"
-                << "  User Queue Pool        : " << res.user_queue_size << " tracks remaining\n"
-                << "  Shuffled Playlist Pool : " << res.playlist_pool_size << " tracks remaining\n"
+                << " User Queue     : " << res.user_queue_size << " tracks remaining\n"
+                << " Playlist Queue : " << res.playlist_pool_size << " tracks remaining\n"
                 << "============================================================\n" << std::flush;
             }
             close(socket_fd);
