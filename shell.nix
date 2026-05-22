@@ -1,17 +1,20 @@
 { pkgs ? import <nixpkgs> {} }:
 
 pkgs.mkShell {
-  buildInputs = with pkgs; [
-    gcc
+  nativeBuildInputs = with pkgs; [
     cmake
     pkg-config
+  ];
+
+  buildInputs = with pkgs; [
+    gcc
     ffmpeg
     alsa-lib
     libpulseaudio
+    qt6.qtbase
   ];
 
- # forcing Nix to expose the compiled .so binaries to dlopen()
- shellHook = ''
+  shellHook = ''
     export LD_LIBRARY_PATH="${pkgs.libpulseaudio}/lib:${pkgs.alsa-lib}/lib:$LD_LIBRARY_PATH"
 
     export PULSE_SERVER="unix:/run/user/1000/pulse/native"

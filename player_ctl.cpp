@@ -40,18 +40,19 @@ bool transmit_command(const PlayerCommand& cmd) {
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        std::cout << "\nMedia player status;\n"
-                << "============================================================\n"
-                << "| Track   : " << res.track_name << "\n"
-                << "| Time    : " << format_time(res.elapsed_seconds) << " / " << format_time(res.duration_seconds) << "\n"
-                << "| Volume  : " << res.current_volume << "%\n"
-                << "| Playing : " << (res.is_paused ? "PAUSED" : "PLAYING") << "\n"
-                << "| Shuffle : " << (res.shuffle_enabled ? "ON" : "OFF") << "\n"
-                << "| Loop    : " << (res.loop_enabled ? "ON" : "OFF") << "\n"
-                << "|-----------------------------------------------------------\n"
-                << "| User Queue     : " << res.user_queue_size << " tracks remaining\n"
-                << "| Playlist Queue : " << res.playlist_pool_size << " tracks remaining\n"
-                << "============================================================\n" << std::flush;
+        std::cout << "Usage:\n"
+        << "  " << argv[0] << " --add <path_to_song> _-_-_-_- Add a song to the high-priority user queue\n"
+        << "  " << argv[0] << " --playlist <path_to_m3u> _-_- Load an .m3u playlist file into background queue\n"
+        << "  " << argv[0] << " --clear -_-_-_-_-_-_-_-_-_-_- Clear the background playlist queue\n"
+        << "  " << argv[0] << " --play _-_-_-_-_-_-_-_-_-_-_- Play... It's play...'\n"
+        << "  " << argv[0] << " --pause -_-_-_-_-_-_-_-_-_-_- As simple as play, but pause\n"
+        << "  " << argv[0] << " --skip _-_-_-_-_-_-_-_-_-_-_- Skips the song to the next in queue\n"
+        << "  " << argv[0] << " --back _-_-_-_-_-_-_-_-_-_-_- Plays the previous song\n"
+        << "  " << argv[0] << " --volume _-_-_-_-_-_-_-_-_-_- Changes the volume to a value from 0 to 100\n"
+        << "  " << argv[0] << " --status _-_-_-_-_-_-_-_-_-_- Shows the current status os the main player\n"
+        << "  " << argv[0] << " --shuffle -_-_-_-_-_-_-_-_-_- Toggles the shuffle of the playlist\n"
+        << "  " << argv[0] << " --loop _-_-_-_-_-_-_-_-_-_-_- Toggles the loop of the playlist\n"
+        << "  " << argv[0] << " --quit _-_-_-_-_-_-_-_-_-_-_- Quit the player and save settings\n";
         return 1;
 
     }
