@@ -11,7 +11,6 @@ pkgs.mkShell {
     ffmpeg
     alsa-lib
     libpulseaudio
-    qt6.qtbase
   ];
 
   shellHook = ''
