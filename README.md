@@ -11,3 +11,16 @@ simply running ./Geniusnt-ctl will give a list of the avalable flags for the med
 This is a CLI media player designed to be put on something like a USB drive along side any audio files you have, meaning if you wish to play your music on a computer without a media player, you can still listen to music completely offline.
 
 If your user account ID isn't 1000, you will have to change this in the shell.nix file to match your ID.
+
+If your compiling this I highly recomend you also recompile ffmpeg from source with these configs:
+`./configure \
+  --prefix="$HOME/ffmpeg_local_build" \
+  --enable-static \
+  --disable-shared \
+  --disable-network \
+  --disable-programs \
+  --disable-doc \
+  --disable-autodetect`
+You can rebuild it by git cloning into the ffmpeg source. Then install this version to your build environment and compile Geniusnt.
+
+The folder named "Geniusnt" is the precompiled, ready to go version of Geniusnt. You should be able to put this straight onto your USB stick and run it on most Linux based systems without issues.
